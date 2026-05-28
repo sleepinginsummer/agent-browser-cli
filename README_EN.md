@@ -46,7 +46,7 @@ Please read https://github.com/sleepinginsummer/agent-browser-cli/blob/main/AI_I
 
 ## Improvements
 
-- Extracted browser control capability from GenericAgent and exposed it as a CLI for Codex, Claude Code, and OpenCode. The GenericAgent browser extension can be reused and does not need to be reinstalled.
+- Extracted browser control capability from GenericAgent and exposed it as a CLI for Codex, Claude Code, and OpenCode. The GenericAgent browser extension can be reused; if this extension and the GenericAgent extension are loaded at the same time, they should use different extension ports so they do not both connect to the same `TMWebDriver` service.
 - Avoids reinitializing the browser connection for every command.
 - Adds a startup lock to avoid repeated low-level port binding when multiple CLI commands start concurrently.
 - Adds the skill `skills/agent-browser-cli/SKILL.md` for AI usage reference.
@@ -129,13 +129,14 @@ assets/tmwd_cdp_bridge
 
 ### Custom Chrome Extension WebSocket Port
 
-- `18765`: default extension WebSocket port, used by the Chrome extension. It can be changed with `agent-browser-cli set-extension-port <port>`.
+- `18768`: default extension WebSocket port, used by the Chrome extension. It can be changed with `agent-browser-cli set-extension-port <port>`.
+- `18765`: common GenericAgent `TMWebDriver` port. If this extension and the GenericAgent extension are both enabled in Chrome, do not point both extensions at the same port. Otherwise both extensions may try to control the same tab's `chrome.debugger` session and fail with `Another debugger is already attached`.
 - `18767`: CLI HTTP API port, used by the CLI to reuse the session. It cannot be used as the extension port.
 
 Change the extension port from CLI:
 
 ```bash
-agent-browser-cli set-extension-port 18766
+agent-browser-cli set-extension-port 18768
 ```
 
 This command writes the config file. If the daemon is running, it restarts the daemon so the new port takes effect immediately.
@@ -144,7 +145,7 @@ You can also edit the config file manually. The config file is `~/.agent-browser
 
 ```json
 {
-  "extension_port": 18765
+  "extension_port": 18768
 }
 ```
 
@@ -152,13 +153,15 @@ Manual edit example:
 
 ```json
 {
-  "extension_port": 18766
+  "extension_port": 18768
 }
 ```
 
 After manually editing the config file, run `agent-browser-cli restart` so the daemon listens on the new port.
 
 The Chrome extension popup can also update the extension port and reconnect immediately. The popup port must match the CLI `extension_port` config.
+
+If the same Chrome Profile already has GenericAgent's `TMWD CDP Bridge` extension installed, keep GenericAgent on `18765` and let this project use its default `18768`. Both extensions can exist in the same profile, but avoid running CDP fallback operations against the same tab from both tools at the same time.
 
 ### Dialog Suppression
 

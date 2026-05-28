@@ -18,7 +18,7 @@ async function refreshBridgeStatus() {
     const resp = await chrome.runtime.sendMessage({ cmd: 'status' });
     if (!resp?.ok) throw new Error(resp?.error || 'unknown');
     const data = resp.data || {};
-    portInput.value = data.wsPort || 18765;
+    portInput.value = data.wsPort || 18768;
     status.textContent = `状态: ${data.wsConnected ? '已连接' : '未连接'} ${data.wsUrl || ''}`;
     renderProfileStatus(data);
   } catch (e) {

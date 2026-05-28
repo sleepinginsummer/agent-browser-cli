@@ -46,7 +46,7 @@
 
 ## 改进内容
 
-- 从 GenericAgent 中拆出浏览器控制能力，使用cli 提供给codex、claude code、opencode使用。GenericAgent浏览器插件不需要重新安装，可以共用同一个插件
+- 从 GenericAgent 中拆出浏览器控制能力，使用cli 提供给codex、claude code、opencode使用。可以复用 GenericAgent 浏览器插件；如果同时加载本项目扩展和 GenericAgent 扩展，需要使用不同插件端口，避免两个扩展同时连接同一个 `TMWebDriver` 服务。
 - 避免每次命令都重新初始化浏览器连接。
 - 新增启动锁，避免多个 CLI 并发启动时重复绑定底层端口。
 - 增加skill：`skills/agent-browser-cli/SKILL.md`，提供ai参考使用。
@@ -129,13 +129,14 @@ assets/tmwd_cdp_bridge
 
 ###  自定义Chrome插件的ws监听端口
 
-- `18765`：默认插件 WebSocket 端口，Chrome 扩展连接使用，可通过 `agent-browser-cli set-extension-port <port>` 修改。
+- `18768`：默认插件 WebSocket 端口，Chrome 扩展连接使用，可通过 `agent-browser-cli set-extension-port <port>` 修改。
+- `18765`：GenericAgent 的常用 `TMWebDriver` 端口。若 Chrome 中同时启用本项目扩展和 GenericAgent 扩展，请不要让两者连接同一个端口，否则两个扩展都可能尝试控制同一个标签页的 `chrome.debugger`，导致 `Another debugger is already attached`。
 - `18767`：CLI HTTP API 端口，供 CLI 复用会话，不能作为插件端口使用。
 
 CLI 修改插件端口：
 
 ```bash
-agent-browser-cli set-extension-port 18766
+agent-browser-cli set-extension-port 18768
 ```
 
 该命令会写入配置文件；如果 daemon 正在运行，会自动重启 daemon，让新端口立即生效。
@@ -144,7 +145,7 @@ agent-browser-cli set-extension-port 18766
 
 ```json
 {
-  "extension_port": 18765
+  "extension_port": 18768
 }
 ```
 
@@ -152,13 +153,15 @@ agent-browser-cli set-extension-port 18766
 
 ```json
 {
-  "extension_port": 18766
+  "extension_port": 18768
 }
 ```
 
 手动改配置后需要执行 `agent-browser-cli restart`，daemon 才会按新端口重新监听。
 
 Chrome 插件 popup 中也可以修改插件端口并立即重连。插件端口必须和 CLI 配置中的 `extension_port` 一致。
+
+如果已经在同一个 Chrome Profile 中安装了 GenericAgent 的 `TMWD CDP Bridge` 扩展，建议保留 GenericAgent 使用 `18765`，本项目使用默认 `18768`。两个扩展可以同时存在，但不要同时对同一个标签页执行需要 CDP fallback 的操作。
 
 ### Profile Label
 

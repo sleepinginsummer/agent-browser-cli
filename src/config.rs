@@ -4,7 +4,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-pub const DEFAULT_EXTENSION_PORT: u16 = 18765;
+pub const DEFAULT_EXTENSION_PORT: u16 = 18768;
 pub const CLI_API_PORT: u16 = 18767;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

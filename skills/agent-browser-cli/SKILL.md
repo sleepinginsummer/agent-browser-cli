@@ -114,8 +114,10 @@ agent-browser-cli click '@e1' --wait-js 'return document.body.innerText.includes
 默认扩展 WebSocket 端口：
 
 ```text
-127.0.0.1:18765
+127.0.0.1:18768
 ```
+
+GenericAgent 常用 `TMWebDriver` 端口是 `127.0.0.1:18765`。如果用户同时启用了 GenericAgent 的 `TMWD CDP Bridge` 和 agent-browser-cli 扩展，应保持两个扩展端口不同；推荐 GenericAgent 使用 `18765`，agent-browser-cli 使用默认 `18768`。
 
 配置文件：
 

@@ -16,7 +16,7 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 let lastCommandAt = 0;
-const DEFAULT_WS_PORT = 18765;
+const DEFAULT_WS_PORT = 18768;
 const CLI_API_PORT = 18767;
 let wsPort = DEFAULT_WS_PORT;
 const browserId = `browser-${crypto.randomUUID()}`;
