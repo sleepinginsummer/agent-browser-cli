@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod html;
+mod open_target;
 mod protocol;
 mod server;
 

@@ -1,3 +1,4 @@
+use crate::open_target::{resolve_open_target, OpenTargetError, TargetKind};
 use crate::protocol::{
     DriverState, ElementDomInfo, ElementRef, ExecResult, RectInfo, Session, SnapshotCache, TabInfo,
     WsIncoming,
@@ -67,7 +68,9 @@ struct ExecRequest {
 
 #[derive(Debug, Deserialize)]
 struct OpenRequest {
-    url: String,
+    target: Option<String>,
+    url: Option<String>,
+    cwd: Option<PathBuf>,
     #[serde(default = "default_active")]
     active: bool,
     switch_tab_id: Option<String>,
@@ -79,6 +82,8 @@ struct OpenRequest {
     window: bool,
     #[serde(default)]
     allow_focus: bool,
+    #[serde(default = "default_open_readiness_timeout")]
+    readiness_timeout: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,6 +286,10 @@ fn default_wait_timeout() -> f64 {
     3.0
 }
 
+fn default_open_readiness_timeout() -> f64 {
+    10.0
+}
+
 fn default_wait_interval() -> f64 {
     0.1
 }
@@ -473,12 +482,16 @@ async fn handle_ws_message(
             browser_id,
             profile_id,
             profile_label,
+            extension_version,
+            file_scheme_access,
             tabs,
         }
         | WsIncoming::TabsUpdate {
             browser_id,
             profile_id,
             profile_label,
+            extension_version,
+            file_scheme_access,
             tabs,
         } => {
             let current: std::collections::HashSet<String> = tabs
@@ -505,8 +518,13 @@ async fn handle_ws_message(
                     registered_ids.push(session_key.clone());
                 }
                 driver.latest_session_key = Some(session_key.clone());
-                if driver.default_session_key.is_none() {
+                if driver.default_session_key.is_none()
+                    || driver.preferred_default_tab_id.as_deref() == Some(&tab_id)
+                {
                     driver.default_session_key = Some(session_key.clone());
+                    if driver.preferred_default_tab_id.as_deref() == Some(&tab_id) {
+                        driver.preferred_default_tab_id = None;
+                    }
                 }
                 driver.sessions.insert(
                     session_key.clone(),
@@ -516,6 +534,8 @@ async fn handle_ws_message(
                         browser_id: browser_id.clone(),
                         profile_id: profile_id.clone(),
                         profile_label: profile_label.clone(),
+                        extension_version: extension_version.clone(),
+                        file_scheme_access,
                         info,
                         sender: sender.clone(),
                         disconnected_at: None,
@@ -572,6 +592,7 @@ async fn root() -> &'static str {
 async fn health(State(state): State<AppState>) -> Json<Value> {
     let active_tabs_count = active_tabs(&state, false).await.len();
     let extension_connected = has_extension_connection(&state).await;
+    let profile_capabilities = extension_profile_capabilities(&state).await;
     let ready = extension_connected && active_tabs_count > 0;
     let uptime = state
         .started_at
@@ -597,7 +618,8 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         },
         "connection": {
             "extension_connected": extension_connected,
-            "active_tabs": active_tabs_count
+            "active_tabs": active_tabs_count,
+            "profiles": profile_capabilities
         },
         "uptime": uptime,
         "idle_for": idle_for,
@@ -961,27 +983,199 @@ async fn exec(State(state): State<AppState>, Json(req): Json<ExecRequest>) -> Js
 
 async fn open_tab(State(state): State<AppState>, Json(req): Json<OpenRequest>) -> Json<Value> {
     touch(&state).await;
+    let target = match resolve_request_target(req.target.as_deref(), req.url.as_deref()) {
+        Ok(target) => target,
+        Err(err) => return Json(open_target_error_json(err)),
+    };
+    let resolved = match resolve_open_target(target, req.cwd.as_deref()) {
+        Ok(resolved) => resolved,
+        Err(err) => return Json(open_target_error_json(err)),
+    };
+    let selector = SessionSelector::new(req.switch_tab_id, req.browser, req.profile);
+
+    if resolved.kind == TargetKind::LocalResource
+        && (!req.readiness_timeout.is_finite() || req.readiness_timeout <= 0.0)
+    {
+        return Json(json!({
+            "ok": false,
+            "error": "File readiness timeout must be a finite number greater than zero",
+            "error_code": "invalid_readiness_timeout",
+            "details": { "readiness_timeout": req.readiness_timeout }
+        }));
+    }
+
+    if resolved.kind == TargetKind::LocalResource {
+        let status_payload = json!({ "cmd": "status" }).to_string();
+        let status = match execute_page_js(&state, &status_payload, selector.clone(), true).await {
+            Ok(value) => value.get("js_return").cloned().unwrap_or(Value::Null),
+            Err(err) => {
+                return Json(json!({
+                    "ok": false,
+                    "error": format!("Could not query extension file capability: {err}"),
+                    "error_code": "extension_upgrade_required",
+                    "details": { "minimum_extension_version": "2.1" }
+                }))
+            }
+        };
+        let installed_version = status
+            .get("extensionVersion")
+            .and_then(Value::as_str)
+            .unwrap_or("0");
+        if !version_at_least(installed_version, "2.1") {
+            return Json(json!({
+                "ok": false,
+                "error": format!("Agent Browser CLI Bridge {installed_version} does not support local files; version 2.1 or newer is required"),
+                "error_code": "extension_upgrade_required",
+                "details": {
+                    "installed_extension_version": installed_version,
+                    "minimum_extension_version": "2.1"
+                }
+            }));
+        }
+        if status.get("fileSchemeAccess").and_then(Value::as_bool) != Some(true) {
+            return Json(json!({
+                "ok": false,
+                "error": "Agent Browser CLI Bridge is not allowed to access file URLs",
+                "error_code": "file_scheme_access_denied",
+                "details": {
+                    "extension_id": status.get("extensionId").cloned().unwrap_or(Value::Null),
+                    "instructions": [
+                        "Open chrome://extensions",
+                        "Select Agent Browser CLI Bridge",
+                        "Enable Allow access to file URLs"
+                    ]
+                }
+            }));
+        }
+    }
+
     let group_title = req.group_title.or(req.session);
     let payload = json!({
         "cmd": "openTab",
-        "url": normalize_url(&req.url),
+        "url": resolved.navigation_url.clone(),
         "active": req.active,
         "window": req.window,
         "allowFocus": req.allow_focus,
         "groupTitle": group_title,
     })
     .to_string();
-    let result = execute_page_js(
-        &state,
-        &payload,
-        SessionSelector::new(req.switch_tab_id, req.browser, req.profile),
-        true,
-    )
-    .await;
-    Json(match result {
-        Ok(value) => json!({ "ok": true, "result": normalize_open_result(&state, value).await }),
-        Err(err) => json!({ "ok": false, "error": err.to_string() }),
+    let value = match execute_page_js(&state, &payload, selector, true).await {
+        Ok(value) => value,
+        Err(err) => return Json(json!({ "ok": false, "error": err.to_string() })),
+    };
+    let result = normalize_open_result(&state, value.clone()).await;
+    let opened_tab_id = result
+        .get("opened_tab_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let expected_session_key = result
+        .get("opened_session_key")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    if resolved.kind == TargetKind::LocalResource {
+        let ready = if let Some(key) = expected_session_key.as_deref() {
+            wait_for_session_key(&state, key, req.readiness_timeout).await
+        } else {
+            false
+        };
+        if !ready {
+            return Json(json!({
+                "ok": false,
+                "error": format!("File tab was created but did not become controllable within {} seconds", req.readiness_timeout),
+                "error_code": "file_tab_readiness_timeout",
+                "opened_tab_id": opened_tab_id,
+                "opened_session_key": expected_session_key,
+                "details": {
+                    "timeout_seconds": req.readiness_timeout,
+                    "tab_preserved": true,
+                    "navigation_url": resolved.navigation_url
+                }
+            }));
+        }
+    }
+
+    if req.active {
+        let mut driver = state.driver.lock().await;
+        if let Some(key) = expected_session_key.clone() {
+            if driver.sessions.get(&key).is_some_and(Session::is_active) {
+                driver.default_session_key = Some(key);
+                driver.preferred_default_tab_id = None;
+            } else if let Some(tab_id) = opened_tab_id {
+                driver.preferred_default_tab_id = Some(tab_id);
+            }
+        }
+    }
+    Json(json!({ "ok": true, "result": result }))
+}
+
+fn resolve_request_target<'a>(
+    target: Option<&'a str>,
+    url: Option<&'a str>,
+) -> Result<&'a str, OpenTargetError> {
+    match (target, url) {
+        (Some(target), Some(url)) if target != url => Err(OpenTargetError {
+            code: "ambiguous_open_target",
+            message: "Open request contains conflicting target and url fields".to_string(),
+            details: json!({ "target": target, "url": url }),
+        }),
+        (Some(target), _) => Ok(target),
+        (_, Some(url)) => Ok(url),
+        (None, None) => Err(OpenTargetError {
+            code: "missing_open_target",
+            message: "Open request requires target or url".to_string(),
+            details: json!({}),
+        }),
+    }
+}
+
+fn open_target_error_json(err: OpenTargetError) -> Value {
+    json!({
+        "ok": false,
+        "error": err.message,
+        "error_code": err.code,
+        "details": err.details,
     })
+}
+
+fn version_at_least(installed: &str, minimum: &str) -> bool {
+    let parse = |value: &str| {
+        value
+            .split('.')
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+    let mut installed = parse(installed);
+    let mut minimum = parse(minimum);
+    let len = installed.len().max(minimum.len());
+    installed.resize(len, 0);
+    minimum.resize(len, 0);
+    installed >= minimum
+}
+
+async fn wait_for_session_key(state: &AppState, session_key: &str, timeout: f64) -> bool {
+    let deadline = Instant::now() + Duration::from_secs_f64(timeout.max(0.1));
+    loop {
+        {
+            let driver = state.driver.lock().await;
+            if driver
+                .sessions
+                .get(session_key)
+                .is_some_and(Session::is_active)
+            {
+                return true;
+            }
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        tokio::select! {
+            _ = state.sessions_ready.notified() => {}
+            _ = tokio::time::sleep(remaining.min(Duration::from_millis(100))) => {}
+        }
+    }
 }
 
 async fn normalize_open_result(state: &AppState, value: Value) -> Value {
@@ -1306,6 +1500,36 @@ async fn active_tabs_filtered(
         .collect())
 }
 
+async fn extension_profile_capabilities(state: &AppState) -> Vec<Value> {
+    let driver = state.driver.lock().await;
+    let mut profiles: HashMap<(String, String), Value> = HashMap::new();
+    for session in driver
+        .sessions
+        .values()
+        .filter(|session| session.is_active())
+    {
+        profiles
+            .entry((session.browser_id.clone(), session.profile_id.clone()))
+            .or_insert_with(|| {
+                json!({
+                    "browser_id": session.browser_id,
+                    "profile_id": session.profile_id,
+                    "profile_label": session.profile_label,
+                    "extension_version": session.extension_version,
+                    "file_scheme_access": session.file_scheme_access,
+                })
+            });
+    }
+    let mut values: Vec<Value> = profiles.into_values().collect();
+    values.sort_by(|a, b| {
+        a.get("profile_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(b.get("profile_id").and_then(Value::as_str).unwrap_or(""))
+    });
+    values
+}
+
 async fn has_extension_connection(state: &AppState) -> bool {
     let driver = state.driver.lock().await;
     driver
@@ -1623,14 +1847,6 @@ return {{ result: __mainResult, wait: {{ ok: __matched, matched: __matched, valu
         timeout_ms = (timeout.max(0.0) * 1000.0) as u64,
         interval_ms = ((interval.max(0.02)) * 1000.0) as u64,
     )
-}
-
-fn normalize_url(url: &str) -> String {
-    if url.starts_with("http://") || url.starts_with("https://") {
-        url.to_string()
-    } else {
-        format!("https://{url}")
-    }
 }
 
 async fn touch(state: &AppState) {
@@ -3660,4 +3876,48 @@ fn decode_base64(input: &str) -> Result<Vec<u8>> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_target_accepts_compatible_fields() {
+        assert_eq!(
+            resolve_request_target(Some("./demo.html"), None).unwrap(),
+            "./demo.html"
+        );
+        assert_eq!(
+            resolve_request_target(None, Some("https://example.com")).unwrap(),
+            "https://example.com"
+        );
+        assert_eq!(
+            resolve_request_target(Some("same"), Some("same")).unwrap(),
+            "same"
+        );
+    }
+
+    #[test]
+    fn request_target_rejects_missing_and_conflicting_fields() {
+        assert_eq!(
+            resolve_request_target(None, None).unwrap_err().code,
+            "missing_open_target"
+        );
+        assert_eq!(
+            resolve_request_target(Some("a"), Some("b"))
+                .unwrap_err()
+                .code,
+            "ambiguous_open_target"
+        );
+    }
+
+    #[test]
+    fn extension_versions_compare_numerically() {
+        assert!(version_at_least("2.1", "2.1"));
+        assert!(version_at_least("2.10", "2.1"));
+        assert!(version_at_least("2.1.1", "2.1"));
+        assert!(!version_at_least("2.0", "2.1"));
+        assert!(!version_at_least("unknown", "2.1"));
+    }
 }

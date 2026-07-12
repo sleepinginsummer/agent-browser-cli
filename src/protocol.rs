@@ -38,6 +38,8 @@ pub struct Session {
     pub browser_id: String,
     pub profile_id: String,
     pub profile_label: Option<String>,
+    pub extension_version: Option<String>,
+    pub file_scheme_access: Option<bool>,
     pub info: TabInfo,
     pub sender: mpsc::UnboundedSender<String>,
     pub disconnected_at: Option<Instant>,
@@ -134,6 +136,7 @@ pub struct DriverState {
     pub pending: HashMap<String, PendingExec>,
     pub default_session_key: Option<String>,
     pub latest_session_key: Option<String>,
+    pub preferred_default_tab_id: Option<String>,
     pub active_exec_sessions: HashMap<String, String>,
     pub acked: HashSet<String>,
 }
@@ -149,6 +152,10 @@ pub enum WsIncoming {
         profile_id: String,
         #[serde(default)]
         profile_label: Option<String>,
+        #[serde(default)]
+        extension_version: Option<String>,
+        #[serde(default)]
+        file_scheme_access: Option<bool>,
         tabs: Vec<ExtTab>,
     },
     #[serde(rename = "tabs_update")]
@@ -159,6 +166,10 @@ pub enum WsIncoming {
         profile_id: String,
         #[serde(default)]
         profile_label: Option<String>,
+        #[serde(default)]
+        extension_version: Option<String>,
+        #[serde(default)]
+        file_scheme_access: Option<bool>,
         tabs: Vec<ExtTab>,
     },
     #[serde(rename = "ack")]

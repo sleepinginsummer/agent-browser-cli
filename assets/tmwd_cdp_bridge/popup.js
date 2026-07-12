@@ -20,10 +20,16 @@ async function refreshBridgeStatus() {
     const data = resp.data || {};
     portInput.value = data.wsPort || 18765;
     status.textContent = `状态: ${data.wsConnected ? '已连接' : '未连接'} ${data.wsUrl || ''}`;
+    const fileAccessStatus = document.getElementById('fileAccessStatus');
+    fileAccessStatus.textContent = `文件网址访问: ${data.fileSchemeAccess ? '已启用' : '未启用'}`;
+    fileAccessStatus.className = data.fileSchemeAccess ? 'status' : 'error';
     renderProfileStatus(data);
   } catch (e) {
     status.textContent = '状态读取失败: ' + e.message;
     status.className = 'error';
+    const fileAccessStatus = document.getElementById('fileAccessStatus');
+    fileAccessStatus.textContent = '文件网址权限读取失败: ' + e.message;
+    fileAccessStatus.className = 'error';
     const profileStatus = document.getElementById('profileStatus');
     profileStatus.textContent = 'Profile 读取失败: ' + e.message;
     profileStatus.className = 'error';

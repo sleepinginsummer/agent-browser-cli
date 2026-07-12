@@ -20,6 +20,7 @@ const DEFAULT_WS_PORT = 18765;
 const CLI_API_PORT = 18767;
 let wsPort = DEFAULT_WS_PORT;
 const browserId = `browser-${crypto.randomUUID()}`;
+const extensionVersion = chrome.runtime.getManifest().version;
 let profileId = null;
 let profileLabel = null;
 
@@ -40,7 +41,7 @@ function withClientIdentity(payload) {
 }
 
 async function handleExtMessage(msg, sender) {
-  if (msg.cmd === 'status') return handleStatus();
+  if (msg.cmd === 'status') return await handleStatus();
   if (msg.cmd === 'setPort') return await handleSetPort(msg);
   if (msg.cmd === 'setProfileLabel') return await handleSetProfileLabel(msg);
   lastCommandAt = Date.now();
@@ -67,7 +68,7 @@ async function handleExtMessage(msg, sender) {
         if (msg.allowFocus === true && tab.windowId) await chrome.windows.update(tab.windowId, { focused: true });
         return { ok: true };
       } else {
-        const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url));
+        const tabs = await queryScriptableTabs();
         const data = tabs.map(t => ({ id: t.id, url: t.url, title: t.title, active: t.active, windowId: t.windowId }));
         return { ok: true, data };
       }
@@ -109,7 +110,7 @@ async function handleExtMessage(msg, sender) {
   return { ok: false, error: 'Unknown cmd: ' + msg.cmd };
 }
 
-function handleStatus() {
+async function handleStatus() {
   return {
     ok: true,
     data: {
@@ -119,7 +120,10 @@ function handleStatus() {
       lastCommandAt,
       browserId,
       profileId,
-      profileLabel
+      profileLabel,
+      extensionId: chrome.runtime.id,
+      extensionVersion,
+      fileSchemeAccess: await chrome.extension.isAllowedFileSchemeAccess()
     }
   };
 }
@@ -645,7 +649,7 @@ async function handleBatch(msg, sender) {
       if (c.cmd === 'cookies') {
         R.push(await handleCookies(c, sender));
       } else if (c.cmd === 'tabs') {
-        const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url));
+        const tabs = await queryScriptableTabs();
         R.push({ ok: true, data: tabs.map(t => ({ id: t.id, url: t.url, title: t.title, active: t.active, windowId: t.windowId })) });
       } else if (c.cmd === 'cdp') {
         const tabId = c.tabId || msg.tabId || sender.tab?.id;
@@ -687,11 +691,16 @@ async function handleCDP(msg, sender) {
     return { ok: false, error: e.message };
   }
 }
-// Filter out chrome:// and other internal tabs that can't be scripted
-const isScriptable = url => url && /^https?:/.test(url);
+// Filter out chrome:// and other internal tabs that can't be scripted.
+const isScriptable = (url, fileSchemeAccess = false) => !!url && (/^https?:/i.test(url) || (fileSchemeAccess && /^file:/i.test(url)));
+
+async function queryScriptableTabs() {
+  const fileSchemeAccess = await chrome.extension.isAllowedFileSchemeAccess();
+  return (await chrome.tabs.query({})).filter(tab => isScriptable(tab.url, fileSchemeAccess));
+}
 
 async function injectContentScriptsIntoExistingTabs() {
-  const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url));
+  const tabs = await queryScriptableTabs();
   for (const tab of tabs) {
     try {
       await chrome.scripting.executeScript({
@@ -1029,9 +1038,11 @@ async function connectWS() {
     console.log('[TMWD-WS] Connected!');
     scheduleKeepalive(); // Keep SW alive while connected
     await loadClientIdentity();
-    const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url));
+    const tabs = await queryScriptableTabs();
     ws.send(JSON.stringify(withClientIdentity({
       type: 'ext_ready',
+      extension_version: extensionVersion,
+      file_scheme_access: await chrome.extension.isAllowedFileSchemeAccess(),
       tabs: tabs.map(t => ({ id: t.id, url: t.url, title: t.title }))
     })));
     console.log('[TMWD-WS] Sent ext_ready with', tabs.length, 'tabs');
@@ -1103,10 +1114,12 @@ chrome.runtime.onInstalled.addListener(() => {
 // Sync tab list on changes
 async function sendTabsUpdate() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url) && !/streamlit/i.test(t.title));
+  const tabs = (await queryScriptableTabs()).filter(t => !/streamlit/i.test(t.title));
   await loadClientIdentity();
   ws.send(JSON.stringify(withClientIdentity({
     type: 'tabs_update',
+    extension_version: extensionVersion,
+    file_scheme_access: await chrome.extension.isAllowedFileSchemeAccess(),
     tabs: tabs.map(t => ({ id: t.id, url: t.url, title: t.title }))
   })));
 }

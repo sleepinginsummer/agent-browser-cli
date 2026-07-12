@@ -341,7 +341,7 @@ struct ConsoleListArgs {
 
 #[derive(Debug, Args)]
 struct OpenArgs {
-    url: String,
+    target: String,
     #[arg(long)]
     background: bool,
     #[arg(long)]
@@ -358,7 +358,7 @@ struct OpenArgs {
     session: Option<String>,
     #[arg(long = "group-title")]
     group_title: Option<String>,
-    #[arg(long, default_value_t = 30.0)]
+    #[arg(long, default_value_t = 10.0)]
     timeout: f64,
 }
 
@@ -578,12 +578,19 @@ pub fn run() -> Result<()> {
         CommandKind::Network(args) => run_network_command(args),
         CommandKind::Console(args) => run_console_command(args),
         CommandKind::Open(args) => {
+            if !args.timeout.is_finite() || args.timeout <= 0.0 {
+                return Err(anyhow!("open --timeout 必须是大于 0 的有限秒数"));
+            }
             ensure_server()?;
+            let cwd = env::current_dir().context("无法读取当前工作目录")?;
+            let request_timeout = (args.timeout + 20.0).max(30.0);
             print_json(request(
                 "POST",
                 "/open",
                 Some(json!({
-                    "url": args.url,
+                    "target": args.target.clone(),
+                    "url": args.target,
+                    "cwd": cwd,
                     "active": !args.background,
                     "window": args.window,
                     "allow_focus": args.focus,
@@ -592,8 +599,9 @@ pub fn run() -> Result<()> {
                     "profile": args.profile,
                     "session": args.session,
                     "group_title": args.group_title,
+                    "readiness_timeout": args.timeout,
                 })),
-                args.timeout,
+                request_timeout,
             )?);
             Ok(())
         }
@@ -909,6 +917,11 @@ fn doctor_value() -> Result<Value> {
         .and_then(|v| v.pointer("/connection/active_tabs"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let file_scheme_profiles = health
+        .as_ref()
+        .and_then(|v| v.pointer("/connection/profiles"))
+        .cloned()
+        .unwrap_or_else(|| json!([]));
     let running = health
         .as_ref()
         .and_then(|v| v.get("running"))
@@ -974,7 +987,14 @@ fn doctor_value() -> Result<Value> {
         "name": "active_tabs",
         "ok": active_tabs > 0,
         "active_tabs": active_tabs,
-        "hint": if active_tabs > 0 { Value::Null } else { json!("Chrome 需要至少打开一个普通 http/https 网页标签页") }
+        "hint": if active_tabs > 0 { Value::Null } else { json!("Chrome 需要至少打开一个普通 http/https/file 网页标签页") }
+    }));
+    checks.push(json!({
+        "name": "file_scheme_access",
+        "ok": true,
+        "optional": true,
+        "profiles": file_scheme_profiles,
+        "hint": "文件网址访问是可选能力；关闭时不影响普通 http/https 页面控制"
     }));
 
     let ok = checks

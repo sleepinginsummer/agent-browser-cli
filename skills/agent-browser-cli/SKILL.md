@@ -30,6 +30,30 @@ agent-browser-cli logs --tail 100
 
 补充一个容易误判的点：`status` / `doctor` 里看到 `daemon_not_running`，如果此时还没有执行 `tabs` / `open` / `exec` / `scan`，通常只是 daemon 按需常驻而未启动，不代表故障。只有目标命令已经失败，或者日志/输出明确提示端口、扩展、标签页异常时，才进入排障。
 
+## 打开本地文件
+
+`open` 支持 HTTP(S) URL、绝对 `file://` URL 和本机文件路径。相对路径以执行 CLI 时的当前目录为基准；支持 `~`、中文、空格和符号链接，符号链接会解析到真实文件。所有普通文件类型均可打开，目录会被拒绝。
+
+```bash
+agent-browser-cli open ./demo.html
+agent-browser-cli open ~/Documents/report.pdf
+agent-browser-cli open 'file:///Users/me/My%20Files/demo.html#intro'
+agent-browser-cli open ./demo.html --timeout 15
+```
+
+本地文件要求 Chrome 扩展版本至少为 2.1，并在 `chrome://extensions` → Agent Browser CLI Bridge → 详情中开启“允许访问文件网址”。权限关闭时 `open` 会在创建标签前失败；`status` / `doctor` 会按 Profile 报告 `file_scheme_access`，但该可选能力不影响普通 HTTP(S) 健康状态。
+
+输入分类规则：
+
+- `./`、`../`、`~/`、绝对路径和显式 `file://` 表示本地文件；文件必须存在且是普通文件。
+- 裸输入若对应当前目录中已存在的文件，文件优先；否则按 Web 地址处理。要强制打开网站，显式写 `https://`。
+- 普通路径中的 `?` 和 `#` 是文件名字符；仅显式 `file://` URL 使用 query/fragment 语义。
+- `localhost`、回环/私网 IP、单标签主机和 `.local` 的无协议地址默认使用 HTTP；其他域名默认 HTTPS；端口 80/443 分别强制 HTTP/HTTPS。
+- 只支持 `http:`、`https:` 和 `file:`；其他显式 scheme 会返回 `unsupported_scheme`。
+- 异平台路径会明确报错，例如 macOS/Linux 不会把 `C:\\Users\\...` 错当作网址。
+
+本地文件 `open` 默认最多等待 10 秒，直到新标签成为可控制会话；可用 `--timeout` 调整。超时后标签会保留，错误结果包含稳定的 `error_code` 和 `opened_tab_id`。活动 `open` 成功后新标签成为默认会话，`--background` 不切换默认会话。
+
 ## 常用命令优先级
 
 先区分三个入口：

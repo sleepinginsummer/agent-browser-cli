@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Agent Browser CLI Bridge",
-  "version": "2.0",
+  "version": "2.1",
   "description": "Browser control bridge for agent-browser-cli",
   "permissions": [
     "cookies",
