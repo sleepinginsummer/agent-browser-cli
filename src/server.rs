@@ -28,6 +28,7 @@ const HOST: &str = "127.0.0.1";
 const API_PORT: u16 = 18767;
 const LOOPBACK_API_ORIGIN: &str = "http://127.0.0.1:18767";
 const LOCALHOST_API_ORIGIN: &str = "http://localhost:18767";
+const CHROME_EXTENSION_ORIGIN_PREFIX: &str = "chrome-extension://";
 // daemon 在无 CLI/API 业务请求后自动退出，避免浏览器扩展长期保持“已连接”浮层。
 const IDLE_SHUTDOWN_TTL: Duration = Duration::from_secs(300);
 const IDLE_SHUTDOWN_CHECK_INTERVAL: Duration = Duration::from_secs(5);
@@ -472,9 +473,13 @@ fn validate_api_access(
     Ok(())
 }
 
+fn build_ws_router(state: AppState) -> Router {
+    Router::new().route("/", get(ws_handler)).with_state(state)
+}
+
 async fn run_ws_server(state: AppState) -> Result<()> {
     let extension_port = state.extension_port;
-    let app = Router::new().route("/", get(ws_handler)).with_state(state);
+    let app = build_ws_router(state);
     let addr: SocketAddr = format!("{HOST}:{extension_port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("WebSocket server running on ws://{addr}");
@@ -482,8 +487,30 @@ async fn run_ws_server(state: AppState) -> Result<()> {
     Ok(())
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+fn is_allowed_extension_origin(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(ORIGIN).and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    let Some(extension_id) = origin.strip_prefix(CHROME_EXTENSION_ORIGIN_PREFIX) else {
+        return false;
+    };
+    extension_id.len() == 32 && extension_id.bytes().all(|byte| matches!(byte, b'a'..=b'p'))
+}
+
+async fn ws_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if !is_allowed_extension_origin(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            "WebSocket connections require a Chrome extension Origin",
+        )
+            .into_response();
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, state))
+        .into_response()
 }
 
 async fn monitor_idle_shutdown(state: AppState) {
@@ -4064,6 +4091,84 @@ mod tests {
         let error = validate_api_access(&headers, "test-token").unwrap_err();
         assert_eq!(error.0, StatusCode::UNAUTHORIZED);
         assert_eq!(error.1, "invalid_api_token");
+    }
+
+    #[test]
+    fn websocket_origin_requires_a_valid_chrome_extension_id() {
+        let mut headers = HeaderMap::new();
+        assert!(!is_allowed_extension_origin(&headers));
+
+        headers.insert(ORIGIN, HeaderValue::from_static("https://evil.example"));
+        assert!(!is_allowed_extension_origin(&headers));
+
+        headers.insert(
+            ORIGIN,
+            HeaderValue::from_static("chrome-extension://abcdefghijklmnopabcdefghijklmnop"),
+        );
+        assert!(is_allowed_extension_origin(&headers));
+
+        headers.insert(
+            ORIGIN,
+            HeaderValue::from_static(
+                "chrome-extension://abcdefghijklmnopabcdefghijklmnop.example.com",
+            ),
+        );
+        assert!(!is_allowed_extension_origin(&headers));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn websocket_router_rejects_missing_and_non_extension_origins() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, build_ws_router(test_state()))
+                .await
+                .unwrap();
+        });
+
+        let status_lines = tokio::task::spawn_blocking(move || {
+            use std::io::{BufRead, BufReader, Write};
+
+            let handshake = |origin: Option<&str>| {
+                let mut stream = std::net::TcpStream::connect(addr).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let origin_header = origin
+                    .map(|value| format!("Origin: {value}\r\n"))
+                    .unwrap_or_default();
+                let request = format!(
+                    "GET / HTTP/1.1\r\n\
+                     Host: {addr}\r\n\
+                     Upgrade: websocket\r\n\
+                     Connection: Upgrade\r\n\
+                     Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                     Sec-WebSocket-Version: 13\r\n\
+                     {origin_header}\r\n"
+                );
+                stream.write_all(request.as_bytes()).unwrap();
+                stream.flush().unwrap();
+                let mut status_line = String::new();
+                BufReader::new(stream).read_line(&mut status_line).unwrap();
+                status_line
+            };
+
+            (
+                handshake(None),
+                handshake(Some("https://evil.example")),
+                handshake(Some("chrome-extension://abcdefghijklmnopabcdefghijklmnop")),
+            )
+        })
+        .await
+        .unwrap();
+        server.abort();
+        let _ = server.await;
+
+        assert!(status_lines.0.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(status_lines.1.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(status_lines
+            .2
+            .starts_with("HTTP/1.1 101 Switching Protocols"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
