@@ -676,10 +676,17 @@ fn request(method: &str, path: &str, payload: Option<Value>, timeout_secs: f64) 
         .timeout(Duration::from_secs_f64(timeout_secs.max(0.1)))
         .build()?;
     let url = format!("http://{HOST}:{PORT}{path}");
+    let token = config::load_api_token()?;
+    let with_token = |request: reqwest::blocking::RequestBuilder| {
+        if let Some(token) = token.as_deref() {
+            request.header(config::API_TOKEN_HEADER, token)
+        } else {
+            request
+        }
+    };
     let response = match method {
-        "GET" => client.get(url).send()?,
-        "POST" => client
-            .post(url)
+        "GET" => with_token(client.get(url)).send()?,
+        "POST" => with_token(client.post(url))
             .json(&payload.unwrap_or_else(|| json!({})))
             .send()?,
         _ => return Err(anyhow!("不支持的 HTTP 方法: {method}")),
@@ -701,6 +708,7 @@ fn ensure_server() -> Result<()> {
     let lock_path = project_dir().join(".agent-browser-cli.lock");
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(lock_path)?;

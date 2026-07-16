@@ -136,7 +136,7 @@ pub struct DriverState {
     pub pending: HashMap<String, PendingExec>,
     pub default_session_key: Option<String>,
     pub latest_session_key: Option<String>,
-    pub preferred_default_tab_id: Option<String>,
+    pub preferred_default_session_key: Option<String>,
     pub active_exec_sessions: HashMap<String, String>,
     pub acked: HashSet<String>,
 }

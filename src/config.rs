@@ -1,11 +1,13 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::path::PathBuf;
 
 pub const DEFAULT_EXTENSION_PORT: u16 = 18765;
 pub const CLI_API_PORT: u16 = 18767;
+pub const API_TOKEN_HEADER: &str = "x-agent-browser-token";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -92,6 +94,70 @@ pub fn log_dir() -> Result<PathBuf> {
 
 pub fn daemon_log_path() -> Result<PathBuf> {
     Ok(log_dir()?.join("daemon.log"))
+}
+
+pub fn api_token_path() -> Result<PathBuf> {
+    Ok(user_config_dir()?.join("api-token"))
+}
+
+pub fn load_api_token() -> Result<Option<String>> {
+    let path = api_token_path()?;
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| format!("读取 API token 失败: {}", path.display()))
+        }
+    };
+    let token = content.trim();
+    if token.is_empty() {
+        return Err(anyhow!("API token 文件为空: {}", path.display()));
+    }
+    Ok(Some(token.to_string()))
+}
+
+pub fn save_api_token(token: &str) -> Result<()> {
+    if token.is_empty() {
+        return Err(anyhow!("API token 不能为空"));
+    }
+    let path = api_token_path()?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("API token 路径缺少父目录: {}", path.display()))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("创建配置目录失败: {}", parent.display()))?;
+    let temp_path = parent.join(format!(".api-token-{}.tmp", std::process::id()));
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| -> Result<()> {
+        let mut file = options
+            .open(&temp_path)
+            .with_context(|| format!("创建 API token 临时文件失败: {}", temp_path.display()))?;
+        file.write_all(token.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        #[cfg(windows)]
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        fs::rename(&temp_path, &path)
+            .with_context(|| format!("保存 API token 失败: {}", path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
 }
 
 pub fn ensure_log_file() -> Result<PathBuf> {
